@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, shrink-to-fit=no">
+    <meta name="referrer" content="origin">
+    <meta http-equiv="Cache-Control" content="no-transform">
+    <meta http-equiv="Cache-Control" content="no-siteapp">
+    <title>MySQL Binlog 恢复误更新删除的数据</title>
+    <link rel="shortcut icon" href="#"/>
+
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/LongCang.css">
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/Monda.css">
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/NotoSansSC.css">
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/Playball.css">
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/PTMono.css">
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/RobotoSlab.css">
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/Rosario.css">
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/UbuntuMono.css">
+
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/post.css">
+    
+        <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/normal.css">
+    
+
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/jquery-3.4.1.min.js"></script>
+
+<meta name="generator" content="Hexo 5.4.0"></head>
+<body>
+    <a id="cover"></a>
+    <div id="header">
+    <div class="header">
+        <div class="vertical">
+            <div class="inner">
+                <h1 class="header-subtitle">MySQL Binlog 恢复误更新删除的数据</h1>
+                <div class="header-subinfo">
+                    <p class="article-info-text">
+                        <span>
+                            <i class="iconfont icon-time"></i> 发表时间：2021-11-29
+                        </span>
+                        
+                            <span id="/2021/11/29/MySQL-Binlog-恢复误更新删除的数据/" class="leancloud_visitors" data-flag-title="MySQL Binlog 恢复误更新删除的数据">
+                                <i class="iconfont icon-browse"></i> 阅读：<sapn class="leancloud-visitors-count"></span>
+                            </span>
+                        
+                        <span>
+                            <i class="iconfont icon-interactive"></i> 评论：<span class="valine-comment-count" data-xid="/2021/11/29/MySQL-Binlog-恢复误更新删除的数据/"></span>
+                        </span>  
+                    </p>                 
+                </div>
+            </div>
+        </div>
+        <canvas id="articleHeaderCanvas"></canvas>
+    </div>
+</div>
+    <div id="container">
+    <div id="content">
+        <div id="article">
+    <div class="toc"></div>
+    <div class="article-body">
+        <h2 id="1-前言"><a href="#1-前言" class="headerlink" title="1. 前言"></a><font face="华文细黑" color="#CC3352">1. 前言</font></h2><p>实际开发、生产场景中会出现，RDS 宕机时数据记录未入库导致数据丢失；误更新、误删除操作导致记录被修改或数据丢失的情况；对于 MySQL 我们可以通过 BinLog 找回误删除的数据。</p>
+<p>BinLog 是 MySQL 自带的日志，偏向逻辑性的日志，记录的是对哪个表的哪一行做了更新操作，更新前后的值是什么。</p>
+<h2 id="2-BinLog-说明"><a href="#2-BinLog-说明" class="headerlink" title="2. BinLog 说明"></a><font face="华文细黑" color="#CC3352">2. BinLog 说明</font></h2><p>Binary Logging 是个存储二进制文件，有两种文件类型</p>
+<ul>
+<li>索引文件<br>文件名后缀为.index; 用于记录哪些日志文件正在被使用</li>
+<li>日志文件<br>文件名后缀为.00000*; 记录数据库所有的 DDL 和 DML (除了数据查询语句)语句事件</li>
+</ul>
+<p>通过设置配置文件 my.ini 的 log_bin 属性来开启日志功能，此时对数据库的操作会记录 binlog 日志并写入磁盘文件。</p>
+<p>编辑 my.ini 可开启并配置 Binlog 策略</p>
+<figure class="highlight xml"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br></pre></td><td class="code"><pre><span class="line"># Binary Logging.</span><br><span class="line"># binlog 日志文件路径</span><br><span class="line">log-bin=C:/ProgramData/MySQL/BinlogData</span><br><span class="line"># binlog 日志格式</span><br><span class="line">binlog_format=ROW</span><br><span class="line"># binlog 过期清理时间/天</span><br><span class="line">expire_logs_days=90</span><br><span class="line"># binlog 日志文件大小/个</span><br><span class="line">max_binlog_size=100M</span><br><span class="line"># binlog 缓存大小</span><br><span class="line">binlog_cache_size=4M</span><br><span class="line">max_binlog_cache_size=512M</span><br></pre></td></tr></table></figure>
+
+<p>通过应用程序 mysqlbinlog.exe 可以从日志文件中读取指定时间段的数据库语句变更详细日志。</p>
+<figure class="highlight xml"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">mysqlbinlog --base64-output=decode-rows -v --database=&lt;数据库名称&gt; --start-datetime=&quot;&lt;起始时间&gt;&quot; --stop-datetime=&quot;&lt;截至时间&gt;&quot; &lt;日志文件&gt; &gt; &lt;输出文件&gt;</span><br></pre></td></tr></table></figure>
+
+<p>如下所示某时刻的变更详细日志，某数据库在 211129 16:53:31 时刻一条更新操作日志，根据该日志可清晰的指定更新前的数据，依据该日志可恢复记录数据到更新前的数据。</p>
+<figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br></pre></td><td class="code"><pre><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">53</span>:<span class="number">31</span> server id <span class="number">1</span>  end_log_pos <span class="number">743</span> CRC32 <span class="number">0xd38b2db6</span> 	Update_rows: <span class="keyword">table</span> id <span class="number">337</span> flags: STMT_END_F</span><br><span class="line">### UPDATE `ecrm_jd`.`xxl_job_user`</span><br><span class="line">### <span class="keyword">WHERE</span></span><br><span class="line">###   <span class="variable">@1</span><span class="operator">=</span><span class="number">2</span></span><br><span class="line">###   <span class="variable">@2</span><span class="operator">=</span><span class="string">&#x27;admin11&#x27;</span></span><br><span class="line">###   <span class="variable">@3</span><span class="operator">=</span><span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span></span><br><span class="line">###   <span class="variable">@4</span><span class="operator">=</span><span class="number">1</span></span><br><span class="line">###   <span class="variable">@5</span><span class="operator">=</span><span class="keyword">NULL</span></span><br><span class="line">### <span class="keyword">SET</span></span><br><span class="line">###   <span class="variable">@1</span><span class="operator">=</span><span class="number">2</span></span><br><span class="line">###   <span class="variable">@2</span><span class="operator">=</span><span class="string">&#x27;niaonao&#x27;</span></span><br><span class="line">###   <span class="variable">@3</span><span class="operator">=</span><span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span></span><br><span class="line">###   <span class="variable">@4</span><span class="operator">=</span><span class="number">1</span></span><br><span class="line">###   <span class="variable">@5</span><span class="operator">=</span><span class="keyword">NULL</span></span><br></pre></td></tr></table></figure>
+<h2 id="3-BinLog-配置是否被开启"><a href="#3-BinLog-配置是否被开启" class="headerlink" title="3. BinLog 配置是否被开启"></a><font face="华文细黑" color="#CC3352">3. BinLog 配置是否被开启</font></h2><p>查看是否开启 BinLog，属性 log_bin 的值为 OFF 则没开启该功能无法通过本文下面的 BigLog 方式恢复数据。log_bin 的值为 ON 则支持恢复数据。</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br></pre></td><td class="code"><pre><span class="line">mysql&gt; show variables like &#x27;log_bin%&#x27;;</span><br><span class="line">+---------------------------------+-------+</span><br><span class="line">| Variable_name                   | Value |</span><br><span class="line">+---------------------------------+-------+</span><br><span class="line">| log_bin                         | OFF   |</span><br><span class="line">| log_bin_basename                |       |</span><br><span class="line">| log_bin_index                   |       |</span><br><span class="line">| log_bin_trust_function_creators | OFF   |</span><br><span class="line">| log_bin_use_v1_row_events       | OFF   |</span><br><span class="line">+---------------------------------+-------+</span><br><span class="line">5 rows in set (0.01 sec)</span><br></pre></td></tr></table></figure>
+<h2 id="4-BinLog-配置怎么开启"><a href="#4-BinLog-配置怎么开启" class="headerlink" title="4. BinLog 配置怎么开启"></a><font face="华文细黑" color="#CC3352">4. BinLog 配置怎么开启</font></h2><p>找到 MySQL 的配置文件，配置文件路径 <code>C:\ProgramData\MySQL\MySQL Server 5.6\my.ini</code><br>只需要把 <code>log-bin</code> 开放后(去除属性前面的 # 注释)重启服务即可，不生效则确认 my.ini 配置无误多次重启后生效。<br>可指定文件生成路径，默认在相对路径下。<br>此处指定 binlog 文件生成配置 C:\ProgramData\MySQL\BinlogData，日志记录格式配置为 MIXED，单文件最大 100M，三个月清理历史文件。<br>log-bin 不指定时，默认使用的设置是 log-bin=mysql-bin；binlog_format 默认使用 STATEMENT；</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br></pre></td><td class="code"><pre><span class="line"># Binary Logging.</span><br><span class="line"># binlog 日志文件</span><br><span class="line">log-bin=C:\ProgramData\MySQL\BinlogData</span><br><span class="line"># binlog 日志格式</span><br><span class="line">binlog_format=ROW</span><br><span class="line"># binlog 过期清理时间/天</span><br><span class="line">expire_logs_days=90</span><br><span class="line"># binlog 日志文件大小/个</span><br><span class="line">max_binlog_size=100M</span><br><span class="line"># binlog 缓存大小</span><br><span class="line">binlog_cache_size=4M</span><br><span class="line">max_binlog_cache_size=512M</span><br></pre></td></tr></table></figure>
+
+<p>重启服务<br>服务名称就是 MySQL56，可通过 WIN+R，输入 services.msc 查看服务。<br><img src="https://img-blog.csdnimg.cn/9e4c8787252647239e0440562316fe49.png?x-oss-process=image/watermark,type_ZHJvaWRzYW5zZmFsbGJhY2s,shadow_50,text_Q1NETiBAbmlhb25hbw==,size_20,color_FFFFFF,t_70,g_se,x_16#pic_center" alt="在这里插入图片描述"></p>
+<figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br></pre></td><td class="code"><pre><span class="line">PS C:\Users\Lenovo<span class="operator">&gt;</span> net stop MySQL56</span><br><span class="line">MySQL56 服务正在停止.</span><br><span class="line">MySQL56 服务已成功停止。</span><br><span class="line"></span><br><span class="line">PS C:\Users\Lenovo<span class="operator">&gt;</span> net <span class="keyword">start</span> MySQL56</span><br><span class="line">MySQL56 服务正在启动 .</span><br><span class="line">MySQL56 服务已经启动成功。</span><br><span class="line"></span><br><span class="line">PS C:\Users\Lenovo<span class="operator">&gt;</span> mysql <span class="operator">-</span>u root <span class="operator">-</span>p</span><br><span class="line">Enter password: <span class="operator">*</span><span class="operator">*</span><span class="operator">*</span><span class="operator">*</span></span><br><span class="line">Welcome <span class="keyword">to</span> the MySQL monitor.  Commands <span class="keyword">end</span> <span class="keyword">with</span> ; <span class="keyword">or</span> \g.</span><br><span class="line">Your MySQL connection id <span class="keyword">is</span> <span class="number">1</span></span><br><span class="line">Server version: <span class="number">5.6</span><span class="number">.21</span><span class="operator">-</span>log MySQL Community Server (GPL)</span><br><span class="line"></span><br><span class="line">Copyright (c) <span class="number">2000</span>, <span class="number">2014</span>, Oracle <span class="keyword">and</span><span class="operator">/</span><span class="keyword">or</span> its affiliates. <span class="keyword">All</span> rights reserved.</span><br><span class="line"></span><br><span class="line">Oracle <span class="keyword">is</span> a registered trademark <span class="keyword">of</span> Oracle Corporation <span class="keyword">and</span><span class="operator">/</span><span class="keyword">or</span> its</span><br><span class="line">affiliates. Other names may be trademarks <span class="keyword">of</span> their respective</span><br><span class="line">owners.</span><br><span class="line"></span><br><span class="line">Type <span class="string">&#x27;help;&#x27;</span> <span class="keyword">or</span> <span class="string">&#x27;\h&#x27;</span> <span class="keyword">for</span> help. Type <span class="string">&#x27;\c&#x27;</span> <span class="keyword">to</span> clear the <span class="keyword">current</span> input statement.</span><br><span class="line"></span><br><span class="line">mysql<span class="operator">&gt;</span> <span class="keyword">show</span> variables <span class="keyword">like</span> <span class="string">&#x27;log_bin%&#x27;</span>;</span><br><span class="line"><span class="operator">+</span><span class="comment">---------------------------------+---------------------------------------+</span></span><br><span class="line"><span class="operator">|</span> Variable_name                   <span class="operator">|</span> <span class="keyword">Value</span>                                 <span class="operator">|</span></span><br><span class="line"><span class="operator">+</span><span class="comment">---------------------------------+---------------------------------------+</span></span><br><span class="line"><span class="operator">|</span> log_bin                         <span class="operator">|</span> <span class="keyword">ON</span>                                    <span class="operator">|</span></span><br><span class="line"><span class="operator">|</span> log_bin_basename                <span class="operator">|</span> C:\ProgramData\MySQL\BinlogData       <span class="operator">|</span></span><br><span class="line"><span class="operator">|</span> log_bin_index                   <span class="operator">|</span> C:\ProgramData\MySQL\BinlogData.index <span class="operator">|</span></span><br><span class="line"><span class="operator">|</span> log_bin_trust_function_creators <span class="operator">|</span> OFF                                   <span class="operator">|</span></span><br><span class="line"><span class="operator">|</span> log_bin_use_v1_row_events       <span class="operator">|</span> OFF                                   <span class="operator">|</span></span><br><span class="line"><span class="operator">+</span><span class="comment">---------------------------------+---------------------------------------+</span></span><br><span class="line"><span class="number">5</span> <span class="keyword">rows</span> <span class="keyword">in</span> <span class="keyword">set</span> (<span class="number">0.00</span> sec)</span><br></pre></td></tr></table></figure>
+<p>可以通过 <code>show variables like &#39;log_bin%&#39;</code> 看到此时配置 log_bin 已开启为 ON.</p>
+<h2 id="5-误更新或删除数据"><a href="#5-误更新或删除数据" class="headerlink" title="5. 误更新或删除数据"></a><font face="华文细黑" color="#CC3352">5. 误更新或删除数据</font></h2><p>以数据库 ecrm_jd 的用户表 xxl_job_user 演示，更新一条记录，删除两条记录。<br>再根据 binlog 日志来追踪数据。</p>
+<figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br></pre></td><td class="code"><pre><span class="line">mysql<span class="operator">&gt;</span> use ecrm_jd;</span><br><span class="line">Database changed</span><br><span class="line"></span><br><span class="line">mysql<span class="operator">&gt;</span> <span class="keyword">select</span> <span class="operator">*</span> <span class="keyword">from</span> xxl_job_user;</span><br><span class="line"><span class="operator">+</span><span class="comment">----+----------+----------------------------------+------+------------+</span></span><br><span class="line"><span class="operator">|</span> id <span class="operator">|</span> username <span class="operator">|</span> password                         <span class="operator">|</span> role <span class="operator">|</span> permission <span class="operator">|</span></span><br><span class="line"><span class="operator">+</span><span class="comment">----+----------+----------------------------------+------+------------+</span></span><br><span class="line"><span class="operator">|</span>  <span class="number">1</span> <span class="operator">|</span> admin    <span class="operator">|</span> e10adc3949ba59abbe56e057f20f883e <span class="operator">|</span>    <span class="number">1</span> <span class="operator">|</span> <span class="keyword">NULL</span>       <span class="operator">|</span></span><br><span class="line"><span class="operator">+</span><span class="comment">----+----------+----------------------------------+------+------------+</span></span><br><span class="line"><span class="number">1</span> <span class="type">row</span> <span class="keyword">in</span> <span class="keyword">set</span> (<span class="number">0.00</span> sec)</span><br><span class="line"></span><br><span class="line">mysql<span class="operator">&gt;</span> <span class="keyword">insert</span> xxl_job_user(username,password,role) <span class="keyword">values</span>(<span class="string">&#x27;admin11&#x27;</span>, <span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span>, <span class="number">1</span>),(<span class="string">&#x27;admin12&#x27;</span>, <span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span>, <span class="number">1</span>),(<span class="string">&#x27;admin13&#x27;</span>, <span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span>, <span class="number">0</span>);</span><br><span class="line">Query OK, <span class="number">3</span> <span class="keyword">rows</span> affected (<span class="number">0.01</span> sec)</span><br><span class="line">Records: <span class="number">3</span>  Duplicates: <span class="number">0</span>  Warnings: <span class="number">0</span></span><br><span class="line"></span><br><span class="line">mysql<span class="operator">&gt;</span> <span class="keyword">select</span> <span class="operator">*</span> <span class="keyword">from</span> xxl_job_user;</span><br><span class="line"><span class="operator">+</span><span class="comment">----+----------+----------------------------------+------+------------+</span></span><br><span class="line"><span class="operator">|</span> id <span class="operator">|</span> username <span class="operator">|</span> password                         <span class="operator">|</span> role <span class="operator">|</span> permission <span class="operator">|</span></span><br><span class="line"><span class="operator">+</span><span class="comment">----+----------+----------------------------------+------+------------+</span></span><br><span class="line"><span class="operator">|</span>  <span class="number">1</span> <span class="operator">|</span> admin    <span class="operator">|</span> e10adc3949ba59abbe56e057f20f883e <span class="operator">|</span>    <span class="number">1</span> <span class="operator">|</span> <span class="keyword">NULL</span>       <span class="operator">|</span></span><br><span class="line"><span class="operator">|</span>  <span class="number">2</span> <span class="operator">|</span> admin11  <span class="operator">|</span> e10adc3949ba59abbe56e057f20f883e <span class="operator">|</span>    <span class="number">1</span> <span class="operator">|</span> <span class="keyword">NULL</span>       <span class="operator">|</span></span><br><span class="line"><span class="operator">|</span>  <span class="number">3</span> <span class="operator">|</span> admin12  <span class="operator">|</span> e10adc3949ba59abbe56e057f20f883e <span class="operator">|</span>    <span class="number">1</span> <span class="operator">|</span> <span class="keyword">NULL</span>       <span class="operator">|</span></span><br><span class="line"><span class="operator">|</span>  <span class="number">4</span> <span class="operator">|</span> admin13  <span class="operator">|</span> e10adc3949ba59abbe56e057f20f883e <span class="operator">|</span>    <span class="number">0</span> <span class="operator">|</span> <span class="keyword">NULL</span>       <span class="operator">|</span></span><br><span class="line"><span class="operator">+</span><span class="comment">----+----------+----------------------------------+------+------------+</span></span><br><span class="line"><span class="number">4</span> <span class="keyword">rows</span> <span class="keyword">in</span> <span class="keyword">set</span> (<span class="number">0.00</span> sec)</span><br><span class="line"></span><br><span class="line">mysql<span class="operator">&gt;</span> update xxl_job_user <span class="keyword">set</span> username <span class="operator">=</span> <span class="string">&#x27;niaonao&#x27;</span> <span class="keyword">where</span> id <span class="operator">=</span> <span class="number">2</span>;</span><br><span class="line">Query OK, <span class="number">1</span> <span class="type">row</span> affected (<span class="number">0.00</span> sec)</span><br><span class="line"><span class="keyword">Rows</span> matched: <span class="number">1</span>  Changed: <span class="number">1</span>  Warnings: <span class="number">0</span></span><br><span class="line"></span><br><span class="line">mysql<span class="operator">&gt;</span> <span class="keyword">delete</span> <span class="keyword">from</span> xxl_job_user <span class="keyword">where</span> id <span class="keyword">in</span> (<span class="number">1</span>,<span class="number">4</span>);</span><br><span class="line">Query OK, <span class="number">2</span> <span class="keyword">rows</span> affected (<span class="number">0.01</span> sec)</span><br><span class="line"></span><br><span class="line">mysql<span class="operator">&gt;</span> <span class="keyword">select</span> <span class="operator">*</span> <span class="keyword">from</span> xxl_job_user;</span><br><span class="line"><span class="operator">+</span><span class="comment">----+----------+----------------------------------+------+------------+</span></span><br><span class="line"><span class="operator">|</span> id <span class="operator">|</span> username <span class="operator">|</span> password                         <span class="operator">|</span> role <span class="operator">|</span> permission <span class="operator">|</span></span><br><span class="line"><span class="operator">+</span><span class="comment">----+----------+----------------------------------+------+------------+</span></span><br><span class="line"><span class="operator">|</span>  <span class="number">2</span> <span class="operator">|</span> niaonao  <span class="operator">|</span> e10adc3949ba59abbe56e057f20f883e <span class="operator">|</span>    <span class="number">1</span> <span class="operator">|</span> <span class="keyword">NULL</span>       <span class="operator">|</span></span><br><span class="line"><span class="operator">|</span>  <span class="number">3</span> <span class="operator">|</span> admin12  <span class="operator">|</span> e10adc3949ba59abbe56e057f20f883e <span class="operator">|</span>    <span class="number">1</span> <span class="operator">|</span> <span class="keyword">NULL</span>       <span class="operator">|</span></span><br><span class="line"><span class="operator">+</span><span class="comment">----+----------+----------------------------------+------+------------+</span></span><br><span class="line"><span class="number">2</span> <span class="keyword">rows</span> <span class="keyword">in</span> <span class="keyword">set</span> (<span class="number">0.00</span> sec)</span><br></pre></td></tr></table></figure>
+<h2 id="6-binlog-日志跟踪查找被删除的数据"><a href="#6-binlog-日志跟踪查找被删除的数据" class="headerlink" title="6. binlog 日志跟踪查找被删除的数据"></a><font face="华文细黑" color="#CC3352">6. binlog 日志跟踪查找被删除的数据</font></h2><p><img src="https://img-blog.csdnimg.cn/d168df6c55e946da9c672d7defd1ebd7.png?x-oss-process=image/watermark,type_ZHJvaWRzYW5zZmFsbGJhY2s,shadow_50,text_Q1NETiBAbmlhb25hbw==,size_20,color_FFFFFF,t_70,g_se,x_16#pic_center" alt="在这里插入图片描述"></p>
+<p>这里是 2021-11-29 16:56 左右修改的，在 C:\ProgramData\MySQL 下找到 &lt;filename&gt;.000003 日志文件。<br>通过应用程序 mysqlbinlog 查看 binlog。<br>去安装路径下找到应用程序 <code>~\MySQL Server 5.6\bin\mysqlbinlog.exe</code><br>WIN+R 输入 cmd 打开命令行窗口，切换到 mysqlbinlog 所在目录，执行以下命令导出脚本。</p>
+<figure class="highlight xml"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">mysqlbinlog --base64-output=decode-rows -v --database=&lt;数据库名称&gt; --start-datetime=&quot;&lt;起始时间&gt;&quot; --stop-datetime=&quot;&lt;截至时间&gt;&quot; &lt;日志文件&gt; &gt; &lt;输出文件&gt;</span><br></pre></td></tr></table></figure>
+<p>此处从文件 BinlogData.000003 中解析导出数据库 ecrm_jd 在 2021-11-29 16:50:00 ~ 2021-11-29 17:30:00 时间内的日志，输出到文件 binlog202111291650.sql</p>
+<figure class="highlight xml"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">C:\Program Files (x86)\MySQL\MySQL Server 5.6\bin&gt;mysqlbinlog --base64-output=decode-rows -v --database=ecrm_jd --start-datetime=&quot;2021-11-29 16:50:00&quot; --stop-datetime=&quot;2021-11-29 17:30:00&quot; C:\ProgramData\MySQL\BinlogData.000003 &gt; binlog202111291650.sql</span><br></pre></td></tr></table></figure>
+<p>打开文件内容如下：</p>
+<figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br><span class="line">51</span><br><span class="line">52</span><br><span class="line">53</span><br><span class="line">54</span><br><span class="line">55</span><br><span class="line">56</span><br><span class="line">57</span><br><span class="line">58</span><br><span class="line">59</span><br><span class="line">60</span><br><span class="line">61</span><br><span class="line">62</span><br><span class="line">63</span><br><span class="line">64</span><br><span class="line">65</span><br><span class="line">66</span><br><span class="line">67</span><br><span class="line">68</span><br><span class="line">69</span><br><span class="line">70</span><br><span class="line">71</span><br><span class="line">72</span><br><span class="line">73</span><br><span class="line">74</span><br><span class="line">75</span><br><span class="line">76</span><br><span class="line">77</span><br><span class="line">78</span><br><span class="line">79</span><br><span class="line">80</span><br><span class="line">81</span><br><span class="line">82</span><br><span class="line">83</span><br><span class="line">84</span><br><span class="line">85</span><br><span class="line">86</span><br><span class="line">87</span><br><span class="line">88</span><br><span class="line">89</span><br><span class="line">90</span><br><span class="line">91</span><br><span class="line">92</span><br><span class="line">93</span><br><span class="line">94</span><br><span class="line">95</span><br><span class="line">96</span><br><span class="line">97</span><br><span class="line">98</span><br><span class="line">99</span><br><span class="line">100</span><br><span class="line">101</span><br><span class="line">102</span><br><span class="line">103</span><br><span class="line">104</span><br><span class="line">105</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">/*!50530 SET @@SESSION.PSEUDO_SLAVE_MODE=1*/</span>;</span><br><span class="line"><span class="comment">/*!40019 SET @@session.max_insert_delayed_threads=0*/</span>;</span><br><span class="line"><span class="comment">/*!50003 SET @OLD_COMPLETION_TYPE=@@COMPLETION_TYPE,COMPLETION_TYPE=0*/</span>;</span><br><span class="line">DELIMITER <span class="comment">/*!*/</span>;</span><br><span class="line"># <span class="keyword">at</span> <span class="number">4</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">15</span>:<span class="number">20</span>:<span class="number">44</span> server id <span class="number">1</span>  end_log_pos <span class="number">120</span> CRC32 <span class="number">0x7b673bd6</span> 	<span class="keyword">Start</span>: binlog v <span class="number">4</span>, server v <span class="number">5.6</span><span class="number">.21</span><span class="operator">-</span>log created <span class="number">211129</span> <span class="number">15</span>:<span class="number">20</span>:<span class="number">44</span> <span class="keyword">at</span> startup</span><br><span class="line"># Warning: this binlog <span class="keyword">is</span> either <span class="keyword">in</span> use <span class="keyword">or</span> was <span class="keyword">not</span> closed properly.</span><br><span class="line"><span class="keyword">ROLLBACK</span><span class="comment">/*!*/</span>;</span><br><span class="line"># <span class="keyword">at</span> <span class="number">120</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">52</span>:<span class="number">19</span> server id <span class="number">1</span>  end_log_pos <span class="number">195</span> CRC32 <span class="number">0xeeb79b0f</span> 	Query	thread_id<span class="operator">=</span><span class="number">4</span>	exec_time<span class="operator">=</span><span class="number">0</span>	error_code<span class="operator">=</span><span class="number">0</span></span><br><span class="line"><span class="keyword">SET</span> <span class="type">TIMESTAMP</span><span class="operator">=</span><span class="number">1638175939</span><span class="comment">/*!*/</span>;</span><br><span class="line"><span class="keyword">SET</span> @<span class="variable">@session</span>.pseudo_thread_id<span class="operator">=</span><span class="number">4</span><span class="comment">/*!*/</span>;</span><br><span class="line"><span class="keyword">SET</span> @<span class="variable">@session</span>.foreign_key_checks<span class="operator">=</span><span class="number">1</span>, @<span class="variable">@session</span>.sql_auto_is_null<span class="operator">=</span><span class="number">0</span>, @<span class="variable">@session</span>.unique_checks<span class="operator">=</span><span class="number">1</span>, @<span class="variable">@session</span>.autocommit<span class="operator">=</span><span class="number">1</span><span class="comment">/*!*/</span>;</span><br><span class="line"><span class="keyword">SET</span> @<span class="variable">@session</span>.sql_mode<span class="operator">=</span><span class="number">1344274432</span><span class="comment">/*!*/</span>;</span><br><span class="line"><span class="keyword">SET</span> @<span class="variable">@session</span>.auto_increment_increment<span class="operator">=</span><span class="number">1</span>, @<span class="variable">@session</span>.auto_increment_offset<span class="operator">=</span><span class="number">1</span><span class="comment">/*!*/</span>;</span><br><span class="line"><span class="comment">/*!\C gbk */</span><span class="comment">/*!*/</span>;</span><br><span class="line"><span class="keyword">SET</span> @<span class="variable">@session</span>.character_set_client<span class="operator">=</span><span class="number">28</span>,@<span class="variable">@session</span>.collation_connection<span class="operator">=</span><span class="number">28</span>,@<span class="variable">@session</span>.collation_server<span class="operator">=</span><span class="number">33</span><span class="comment">/*!*/</span>;</span><br><span class="line"><span class="keyword">SET</span> @<span class="variable">@session</span>.lc_time_names<span class="operator">=</span><span class="number">0</span><span class="comment">/*!*/</span>;</span><br><span class="line"><span class="keyword">SET</span> @<span class="variable">@session</span>.collation_database<span class="operator">=</span><span class="keyword">DEFAULT</span><span class="comment">/*!*/</span>;</span><br><span class="line"><span class="keyword">BEGIN</span></span><br><span class="line"><span class="comment">/*!*/</span>;</span><br><span class="line"># <span class="keyword">at</span> <span class="number">195</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">52</span>:<span class="number">19</span> server id <span class="number">1</span>  end_log_pos <span class="number">263</span> CRC32 <span class="number">0xd1715424</span> 	Table_map: `ecrm_jd`.`xxl_job_user` mapped <span class="keyword">to</span> number <span class="number">337</span></span><br><span class="line"># <span class="keyword">at</span> <span class="number">263</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">52</span>:<span class="number">19</span> server id <span class="number">1</span>  end_log_pos <span class="number">439</span> CRC32 <span class="number">0x93f08743</span> 	Write_rows: <span class="keyword">table</span> id <span class="number">337</span> flags: STMT_END_F</span><br><span class="line">### <span class="keyword">INSERT</span> <span class="keyword">INTO</span> `ecrm_jd`.`xxl_job_user`</span><br><span class="line">### <span class="keyword">SET</span></span><br><span class="line">###   <span class="variable">@1</span><span class="operator">=</span><span class="number">2</span></span><br><span class="line">###   <span class="variable">@2</span><span class="operator">=</span><span class="string">&#x27;admin11&#x27;</span></span><br><span class="line">###   <span class="variable">@3</span><span class="operator">=</span><span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span></span><br><span class="line">###   <span class="variable">@4</span><span class="operator">=</span><span class="number">1</span></span><br><span class="line">###   <span class="variable">@5</span><span class="operator">=</span><span class="keyword">NULL</span></span><br><span class="line">### <span class="keyword">INSERT</span> <span class="keyword">INTO</span> `ecrm_jd`.`xxl_job_user`</span><br><span class="line">### <span class="keyword">SET</span></span><br><span class="line">###   <span class="variable">@1</span><span class="operator">=</span><span class="number">3</span></span><br><span class="line">###   <span class="variable">@2</span><span class="operator">=</span><span class="string">&#x27;admin12&#x27;</span></span><br><span class="line">###   <span class="variable">@3</span><span class="operator">=</span><span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span></span><br><span class="line">###   <span class="variable">@4</span><span class="operator">=</span><span class="number">1</span></span><br><span class="line">###   <span class="variable">@5</span><span class="operator">=</span><span class="keyword">NULL</span></span><br><span class="line">### <span class="keyword">INSERT</span> <span class="keyword">INTO</span> `ecrm_jd`.`xxl_job_user`</span><br><span class="line">### <span class="keyword">SET</span></span><br><span class="line">###   <span class="variable">@1</span><span class="operator">=</span><span class="number">4</span></span><br><span class="line">###   <span class="variable">@2</span><span class="operator">=</span><span class="string">&#x27;admin13&#x27;</span></span><br><span class="line">###   <span class="variable">@3</span><span class="operator">=</span><span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span></span><br><span class="line">###   <span class="variable">@4</span><span class="operator">=</span><span class="number">0</span></span><br><span class="line">###   <span class="variable">@5</span><span class="operator">=</span><span class="keyword">NULL</span></span><br><span class="line"># <span class="keyword">at</span> <span class="number">439</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">52</span>:<span class="number">19</span> server id <span class="number">1</span>  end_log_pos <span class="number">470</span> CRC32 <span class="number">0x48cdfe14</span> 	Xid <span class="operator">=</span> <span class="number">391</span></span><br><span class="line"><span class="keyword">COMMIT</span><span class="comment">/*!*/</span>;</span><br><span class="line"># <span class="keyword">at</span> <span class="number">470</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">53</span>:<span class="number">31</span> server id <span class="number">1</span>  end_log_pos <span class="number">545</span> CRC32 <span class="number">0xdc9527f7</span> 	Query	thread_id<span class="operator">=</span><span class="number">4</span>	exec_time<span class="operator">=</span><span class="number">0</span>	error_code<span class="operator">=</span><span class="number">0</span></span><br><span class="line"><span class="keyword">SET</span> <span class="type">TIMESTAMP</span><span class="operator">=</span><span class="number">1638176011</span><span class="comment">/*!*/</span>;</span><br><span class="line"><span class="keyword">BEGIN</span></span><br><span class="line"><span class="comment">/*!*/</span>;</span><br><span class="line"># <span class="keyword">at</span> <span class="number">545</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">53</span>:<span class="number">31</span> server id <span class="number">1</span>  end_log_pos <span class="number">613</span> CRC32 <span class="number">0x7b2ee120</span> 	Table_map: `ecrm_jd`.`xxl_job_user` mapped <span class="keyword">to</span> number <span class="number">337</span></span><br><span class="line"># <span class="keyword">at</span> <span class="number">613</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">53</span>:<span class="number">31</span> server id <span class="number">1</span>  end_log_pos <span class="number">743</span> CRC32 <span class="number">0xd38b2db6</span> 	Update_rows: <span class="keyword">table</span> id <span class="number">337</span> flags: STMT_END_F</span><br><span class="line">### UPDATE `ecrm_jd`.`xxl_job_user`</span><br><span class="line">### <span class="keyword">WHERE</span></span><br><span class="line">###   <span class="variable">@1</span><span class="operator">=</span><span class="number">2</span></span><br><span class="line">###   <span class="variable">@2</span><span class="operator">=</span><span class="string">&#x27;admin11&#x27;</span></span><br><span class="line">###   <span class="variable">@3</span><span class="operator">=</span><span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span></span><br><span class="line">###   <span class="variable">@4</span><span class="operator">=</span><span class="number">1</span></span><br><span class="line">###   <span class="variable">@5</span><span class="operator">=</span><span class="keyword">NULL</span></span><br><span class="line">### <span class="keyword">SET</span></span><br><span class="line">###   <span class="variable">@1</span><span class="operator">=</span><span class="number">2</span></span><br><span class="line">###   <span class="variable">@2</span><span class="operator">=</span><span class="string">&#x27;niaonao&#x27;</span></span><br><span class="line">###   <span class="variable">@3</span><span class="operator">=</span><span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span></span><br><span class="line">###   <span class="variable">@4</span><span class="operator">=</span><span class="number">1</span></span><br><span class="line">###   <span class="variable">@5</span><span class="operator">=</span><span class="keyword">NULL</span></span><br><span class="line"># <span class="keyword">at</span> <span class="number">743</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">53</span>:<span class="number">31</span> server id <span class="number">1</span>  end_log_pos <span class="number">774</span> CRC32 <span class="number">0x0423f88b</span> 	Xid <span class="operator">=</span> <span class="number">397</span></span><br><span class="line"><span class="keyword">COMMIT</span><span class="comment">/*!*/</span>;</span><br><span class="line"># <span class="keyword">at</span> <span class="number">774</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">54</span>:<span class="number">21</span> server id <span class="number">1</span>  end_log_pos <span class="number">849</span> CRC32 <span class="number">0x6280ce3c</span> 	Query	thread_id<span class="operator">=</span><span class="number">4</span>	exec_time<span class="operator">=</span><span class="number">0</span>	error_code<span class="operator">=</span><span class="number">0</span></span><br><span class="line"><span class="keyword">SET</span> <span class="type">TIMESTAMP</span><span class="operator">=</span><span class="number">1638176061</span><span class="comment">/*!*/</span>;</span><br><span class="line"><span class="keyword">BEGIN</span></span><br><span class="line"><span class="comment">/*!*/</span>;</span><br><span class="line"># <span class="keyword">at</span> <span class="number">849</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">54</span>:<span class="number">21</span> server id <span class="number">1</span>  end_log_pos <span class="number">917</span> CRC32 <span class="number">0xd4ee0972</span> 	Table_map: `ecrm_jd`.`xxl_job_user` mapped <span class="keyword">to</span> number <span class="number">337</span></span><br><span class="line"># <span class="keyword">at</span> <span class="number">917</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">54</span>:<span class="number">21</span> server id <span class="number">1</span>  end_log_pos <span class="number">1044</span> CRC32 <span class="number">0xcc058cef</span> 	Delete_rows: <span class="keyword">table</span> id <span class="number">337</span> flags: STMT_END_F</span><br><span class="line">### <span class="keyword">DELETE</span> <span class="keyword">FROM</span> `ecrm_jd`.`xxl_job_user`</span><br><span class="line">### <span class="keyword">WHERE</span></span><br><span class="line">###   <span class="variable">@1</span><span class="operator">=</span><span class="number">1</span></span><br><span class="line">###   <span class="variable">@2</span><span class="operator">=</span><span class="string">&#x27;admin&#x27;</span></span><br><span class="line">###   <span class="variable">@3</span><span class="operator">=</span><span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span></span><br><span class="line">###   <span class="variable">@4</span><span class="operator">=</span><span class="number">1</span></span><br><span class="line">###   <span class="variable">@5</span><span class="operator">=</span><span class="keyword">NULL</span></span><br><span class="line">### <span class="keyword">DELETE</span> <span class="keyword">FROM</span> `ecrm_jd`.`xxl_job_user`</span><br><span class="line">### <span class="keyword">WHERE</span></span><br><span class="line">###   <span class="variable">@1</span><span class="operator">=</span><span class="number">4</span></span><br><span class="line">###   <span class="variable">@2</span><span class="operator">=</span><span class="string">&#x27;admin13&#x27;</span></span><br><span class="line">###   <span class="variable">@3</span><span class="operator">=</span><span class="string">&#x27;e10adc3949ba59abbe56e057f20f883e&#x27;</span></span><br><span class="line">###   <span class="variable">@4</span><span class="operator">=</span><span class="number">0</span></span><br><span class="line">###   <span class="variable">@5</span><span class="operator">=</span><span class="keyword">NULL</span></span><br><span class="line"># <span class="keyword">at</span> <span class="number">1044</span></span><br><span class="line">#<span class="number">211129</span> <span class="number">16</span>:<span class="number">54</span>:<span class="number">21</span> server id <span class="number">1</span>  end_log_pos <span class="number">1075</span> CRC32 <span class="number">0x23f55056</span> 	Xid <span class="operator">=</span> <span class="number">401</span></span><br><span class="line"><span class="keyword">COMMIT</span><span class="comment">/*!*/</span>;</span><br><span class="line">DELIMITER ;</span><br><span class="line"># <span class="keyword">End</span> <span class="keyword">of</span> log file</span><br><span class="line"><span class="keyword">ROLLBACK</span> <span class="comment">/* added by mysqlbinlog */</span>;</span><br><span class="line"><span class="comment">/*!50003 SET COMPLETION_TYPE=@OLD_COMPLETION_TYPE*/</span>;</span><br><span class="line"><span class="comment">/*!50530 SET @@SESSION.PSEUDO_SLAVE_MODE=0*/</span>;</span><br></pre></td></tr></table></figure>
+
+<p>通过程序 mysqlbinlog 恢复的日志中可以查看指定时间段内的数据库操作语句，找到误 UPDATE、DELETE 语句可以看到被删除的记录属性和属性值，依据该日志可恢复该记录。</p>
+<blockquote>
+<p>参考博客：<br><a target="_blank" rel="noopener" href="https://www.cnblogs.com/q149072205/p/11940591.html">mysql 恢复 delete 删除的数据</a><br><a target="_blank" rel="noopener" href="https://www.cnblogs.com/xingyunfashi/p/8431780.html">mysql 中 binlog_format 的三种模式</a><br><a target="_blank" rel="noopener" href="https://www.cnblogs.com/dadonggg/p/8617826.html">binlog 介绍</a><br><a target="_blank" rel="noopener" href="https://www.cnblogs.com/fengtingxin/p/11104758.html">binlog 浅析</a><br><font size="4" color="#CC3352">Powered By niaonao</font></p>
+</blockquote>
+
+        <p class="suffix-end">__END__</p>
+        <div class="suffix-box">
+            <div class="suffix-box-left">
+                <img src="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/image/sidebar/avatar.jpg" alt="Live For Code">
+            </div>
+            <div class="suffix-box-right">
+                <span class="suffix-box-title">文章作者</span>：Live For Code
+                <br>
+                <span class="suffix-box-title">文章出处</span>：<a href="/2021/11/29/MySQL-Binlog-%E6%81%A2%E5%A4%8D%E8%AF%AF%E6%9B%B4%E6%96%B0%E5%88%A0%E9%99%A4%E7%9A%84%E6%95%B0%E6%8D%AE/" target="_blank">MySQL Binlog 恢复误更新删除的数据</a>
+                <br>
+                <span class="suffix-box-title">作者签名</span>：简单地活着, 肆意又精彩.
+                <br>
+                <span class="suffix-box-title">关于主题</span>：<a href="https://github.com/first19326/Hexo-LiveForCode" target="_blank">Hexo - Live For Code</a>
+                <br>
+                <span class="suffix-box-title">版权声明</span>：文章除特别声明外，均采用 <a href="https://creativecommons.org/licenses/by-nc-nd/4.0/" title="BY-NC-SA" target="_blank">BY-NC-SA</a> 许可协议，转载请注明出处
+                <br>
+            </div>
+            <div style="clear: both;"></div>
+        </div>
+    </div>
+    <div class="article-footer">
+        
+        
+        <div class="article-prev-next">
+            
+            
+                <a href="/2021/11/29/Github-Pages-Hexo-%E5%BB%BA%E7%AB%99%E5%9B%BE%E6%96%87%E6%95%99%E7%A8%8B/" class="next-prefix">» </a> 下一篇：    <a href="/2021/11/29/Github-Pages-Hexo-%E5%BB%BA%E7%AB%99%E5%9B%BE%E6%96%87%E6%95%99%E7%A8%8B/" title="发布于 2021-11-29 10:47">Github Pages + Hexo 建站图文教程</a>
+            
+        </div>
+    </div>
+    
+    <div class="article-comments">
+        <div class="comments-title">
+            评论列表
+        </div>
+        <div class="comments-content">
+        </div>
+    </div>
+
+</div>
+
+    </div>
+</div>
+    <div id="footer"></div>
+    <div id="sidebar">
+    <div class="menu-wrap" style="display:none;">
+        <nav class="menu">
+            <div class="menu-introduce"> 
+                <div class="introduce-avatar"></div> 
+                <div class="introduce-info"> 
+                    <div class="introduce-user"><span></span></div>        
+                </div> 
+            </div> 
+            <div class="menu-list">
+                <ul></ul> 
+            </div> 
+            <div class="menu-link"></div> 
+        </nav>
+        <button class="menu-button-close"></button>
+        <div class="morph-shape" id="morph-shape" data-morph-open="M-7.312,0H15c0,0,66,113.339,66,399.5C81,664.006,15,800,15,800H-7.312V0z;M-7.312,0H100c0,0,0,113.839,0,400c0,264.506,0,400,0,400H-7.312V0z">
+            <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 100 800" preserveAspectRatio="none">
+                <path d="M-7.312,0H0c0,0,0,113.839,0,400c0,264.506,0,400,0,400h-7.312V0z"/>
+            </svg>
+        </div>
+    </div>
+    <button class="menu-button-open">MENU</button>
+    <div class="menu-cover"></div>
+</div>
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/search.css">
+<script type="text/javascript" src="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/iscroll.js"></script>
+<script type="text/javascript" src="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/instantsearch.min.js"></script>
+<div class="search-window">
+    <div class="search-content">
+        <div class="search-content-icon">
+            <i class="iconfont icon-search"></i>
+        </div>
+        <div id="search-input" class="search-input"></div>
+    </div>
+
+    <div class="search-scroll">
+        <div class="search-result">
+            <div id="search-stats" class="search-stats"></div>
+            <div id="search-hits"></div>
+            <div id="search-pagination" class="search-pagination"></div>
+        </div>
+    </div>
+
+    <span class="search-close-icon">
+        <i class="iconfont icon-close"></i>
+    </span>
+</div>
+    <div id="tools">
+    <div class="progressbar-top"></div>
+
+    
+        <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/APlayer.css">
+        <script type="text/javascript" src="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/APlayer.min.js"></script>
+        <script type="text/javascript" src="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/Meting.min.js"></script>
+        <meting-js id="3778678" lrcshow="false" server="netease" type="playlist" fixed="true" autoplay="false" loop="all" order="random" preload="auto" volume="0.67" mutex="true"></meting-js>
+    
+    
+    <div class="wrap-right"></div>
+    <div class="loading"></div>
+</div>
+    <script>
+    window.config = {
+        GitHubUserName     : 'first19326',
+        GitHubRepositories : 'Hexo-LiveForCode',
+
+        BlogUser      : 'Live For Code',
+        BlogAvatar    : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/image/sidebar/avatar.jpg',
+        BlogStartDate : '2020-01-01',
+
+        WebsiteTitleBlur         : '(◍´꒳`◍) Hi, Live For Code',
+        WebsiteTitleBlurTimeOut  : 500,
+        WebsiteTitleFocus        : '(*´∇｀*) 欢迎回来!',
+        WebsiteTitleFocusTimeOut : 1000,
+        WebsiteFavicon           : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/image/website/logo.png',
+
+        ProgressBar: {
+            id       : 'topProgressBar',
+            color    : '#77B6FF',
+            height   : '2px',
+            duration : 0.2
+        },
+
+        Loading: {
+            rebound: {
+                tension  : 16,
+                friction : 5
+            },
+            spinner: {
+                id     : 'spinner',
+                radius : 90,
+                sides  : 3,
+                depth  : 4,
+                colors : {
+                    background : '#F0F0F0',
+                    stroke     : '#272633',
+                    base       : '',
+                    child      : '#272633'
+                },
+                alwaysForward : true,
+                restAt        : 0.5,
+                renderBase    : false
+            }
+        },
+
+        HomeHeaderAnimationRendered : true,
+        HomeHeaderAnimation         : {
+            radius      : 15,
+            density     : 0.2,
+            color       : 'rgba(255, 255, 255, .2)',
+            clearOffset : 0.3
+        },
+
+        ArticleHeaderAnimationRendered : false,
+        ArticleHeaderAnimation         : {
+            triW                  : 14,
+            triH                  : 20,
+            neighbours            : [
+                
+                    'side',
+                
+                    'top',
+                
+                    'bottom',
+                
+            ],
+            speedTrailAppear      : 0.1,
+            speedTrailDisappear   : 0.1,
+            speedTriOpen          : 1,
+            trailMaxLength        : 30,
+            trailIntervalCreation : 100,
+            delayBeforeDisappear  : 2,
+            colors                : [
+                
+                    '#96EDA6',
+                
+                    '#5BC6A9',
+                
+                    '#38668C',
+                
+                    '#374D84',
+                
+                    '#BED5CB',
+                
+                    '#62ADC6',
+                
+                    '#8EE5DE',
+                
+                    '#304E7B',
+                
+            ]
+        },
+
+        BackAnimationRendered          : true,
+        IEBrowserBackAnimationRendered : false,
+        BackAnimation                  : {
+            colorSaturation  : '60%',
+            colorBrightness  : '50%',
+            colorAlpha       : 0.5,
+            colorCycleSpeed  : 5,
+            verticalPosition : 'random',
+            horizontalSpeed  : 200,
+            ribbonCount      : 3,
+            strokeSize       : 0,
+            parallaxAmount   : -0.2,
+            animateSections  : true
+        },
+
+        HomeHeaderImage : [
+            
+                'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/image/header/home.jpg',
+            
+                'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/image/header/home.jpeg',
+            
+        ],
+        HomeBannerText  : '',
+
+        ArticleHeaderImage : [
+            
+                'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/image/header/article.jpg',
+            
+        ],
+
+        OtherBannerText : '',
+
+        MenuList : [
+            
+                {
+                    name   : '首页',
+                    href   : '/',    
+                    target : '',
+                    class  : ''
+                },
+            
+                {
+                    name   : '标签',
+                    href   : '/tag',    
+                    target : '',
+                    class  : ''
+                },
+            
+                {
+                    name   : '分类',
+                    href   : '/category',    
+                    target : '',
+                    class  : ''
+                },
+            
+                {
+                    name   : '归档',
+                    href   : '/archive',    
+                    target : '',
+                    class  : ''
+                },
+            
+                {
+                    name   : '赞赏',
+                    href   : '/donate',    
+                    target : '',
+                    class  : ''
+                },
+            
+                {
+                    name   : '关于',
+                    href   : '/about',    
+                    target : '',
+                    class  : ''
+                },
+            
+                {
+                    name   : '订阅',
+                    href   : '/atom.xml',    
+                    target : '_blank',
+                    class  : ''
+                },
+            
+                {
+                    name   : '搜索',
+                    href   : '',    
+                    target : '',
+                    class  : 'search'
+                },
+            
+                {
+                    name   : '留言板',
+                    href   : '/comment',    
+                    target : '',
+                    class  : ''
+                },
+            
+                {
+                    name   : '友情链接',
+                    href   : '/friend',    
+                    target : '',
+                    class  : ''
+                },
+            
+        ],
+        MenuLink : [
+            
+                
+                    {
+                        icon : 'icon-weibo', 
+                        url  : ''
+                    },
+                
+                    {
+                        icon : 'icon-wechat', 
+                        url  : ''
+                    },
+                
+                    {
+                        icon : 'icon-qq', 
+                        url  : ''
+                    },
+                
+                    {
+                        icon : 'icon-github', 
+                        url  : 'https://github.com/first19326'
+                    },
+                
+            
+        ],
+
+        FooterStyle : 2,
+        BottomText  : {
+            icon    : 'like-fill',
+            left    : '人生若只如初见',
+            right   : '何事秋风悲画扇'
+        },
+        ThemeInfo   : true,
+
+        ConsoleList : [
+            
+                
+                    [
+                        
+                            
+                                'Based on cnblogs theme SimpleMemory.',
+                            
+                                '',
+                            
+                        
+                    ],
+                
+                    [
+                        
+                            
+                                'SimpleMemory Author:',
+                            
+                                'BNDong',
+                            
+                        
+                    ],
+                
+                    [
+                        
+                            
+                                'Theme:',
+                            
+                                'LiveForCode',
+                            
+                        
+                    ],
+                
+            
+        ],
+
+        FontIconExtend : '',
+
+        Donate : {
+            paypal  : '',
+            bitcoin : '',
+            alipay  : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/image/donate/alipay.png',
+            wechat  : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/image/donate/wechat.png'
+        },
+
+        Code : {
+            style : 'normal'
+        },  
+
+        Search : {
+            applicationID : '010C3EANT8',
+            apiKey        : 'c7abab9f11b79102b9aff7fe6d41447d',
+            indexName     : 'Notes',
+            hits          : {
+                page : 10
+            },
+            labels        : {
+                placeholder : '搜索',
+                empty       : '未发现与 「${query}」 相关的内容',
+                stats       : '${hits} 条相关条目，使用了 ${time} 毫秒',
+            }
+        }, 
+
+        Valine : {
+            switch         : true,
+            el             : '.comments-content',
+            appId          : 'srhKtvWPQTWYKh3qX8G8M7v0-gzGzoHsz',
+            appKey         : '8uVSP1q6UlALVC5igYfIfv2h',
+            placeholder    : '你是我一生只会遇见一次的惊喜...',
+            avatar         : 'mm',
+            meta           : 'nick,mail,link',
+            requiredFields : 'nick,mail',
+            pageSize       : 5,
+            lang           : 'zh-cn',
+            visitor        : true,
+            enableQQ       : true
+        },
+
+        Tocbot : {
+            switch                : true,
+            tocSelector           : '.toc',
+            contentSelector       : '.article-body',
+            headingSelector       : 'h1, h2, h3, h4, h5',
+            headingsOffset        : 0,
+            scrollSmooth          : true,
+            scrollSmoothOffset    : -5,
+            positionFixedSelector : '.toc',
+            positionFixedClass    : 'toc-fixed',
+            fixedSidebarOffset    : '',
+        },
+
+        Require : {
+            baseUrl     : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/',
+            waitSeconds : 100
+        },
+
+        Music : {
+            type : 'Meting'
+        },
+        APlayer : {
+            container : '.aplayer',
+            fixed     : true,
+            autoplay  : false,
+            loop      : 'all',
+            order     : 'random',
+            preload   : 'auto',
+            volume    : 0.67,
+            mutex     : true,
+            lrcType   : 3,
+            audio     : [
+                
+                    {
+                        name   : 'aLIEz',
+                        artist : 'mizuki（瑞葵）',
+                        cover  : '/music/cover/aLIEz.jpg',
+                        url    : '/music/song/aLIEz.mp3',
+                        lrc    : '/music/lrc/aLIEz.lrc'
+                    },
+                
+                    {
+                        name   : 'Endless Tears',
+                        artist : 'CLIFF EDGE',
+                        cover  : '/music/cover/Endless Tears.jpg',
+                        url    : '/music/song/Endless Tears.mp3',
+                        lrc    : '/music/lrc/Endless Tears.lrc'
+                    },
+                
+                    {
+                        name   : 'Miracle',
+                        artist : 'Cascada',
+                        cover  : '/music/cover/Miracle.jpg',
+                        url    : '/music/song/Miracle.mp3',
+                        lrc    : '/music/lrc/Miracle.lrc'
+                    },
+                
+                    {
+                        name   : 'Roll The Dice',
+                        artist : '高珊',
+                        cover  : '/music/cover/Roll The Dice.jpg',
+                        url    : '/music/song/Roll The Dice.mp3',
+                        lrc    : '/music/lrc/Roll The Dice.lrc'
+                    },
+                
+                    {
+                        name   : 'See You Again',
+                        artist : 'Charlie Puth, Wiz Khalifa',
+                        cover  : '/music/cover/See You Again.jpg',
+                        url    : '/music/song/See You Again.mp3',
+                        lrc    : '/music/lrc/See You Again.lrc'
+                    },
+                
+                    {
+                        name   : 'Traveling Light',
+                        artist : 'Joel Hanson, Sara Groves',
+                        cover  : '/music/cover/Traveling Light.jpg',
+                        url    : '/music/song/Traveling Light.mp3',
+                        lrc    : '/music/lrc/Traveling Light.lrc'
+                    },
+                
+                    {
+                        name   : '痴心绝对',
+                        artist : '李圣杰',
+                        cover  : '/music/cover/痴心绝对.jpg',
+                        url    : '/music/song/痴心绝对.mp3',
+                        lrc    : '/music/lrc/痴心绝对.lrc'
+                    },
+                
+                    {
+                        name   : '好想大声说爱你',
+                        artist : 'BAAD（バード）',
+                        cover  : '/music/cover/好想大声说爱你.jpg',
+                        url    : '/music/song/好想大声说爱你.mp3',
+                        lrc    : '/music/lrc/好想大声说爱你.lrc'
+                    },
+                
+            ]
+        },
+        Meting : {
+            id       : '3778678', 
+            lrcshow  : false, 
+            server   : 'netease', 
+            type     : 'playlist', 
+            fixed    : true, 
+            autoplay : false, 
+            loop     : 'all', 
+            order    : 'random', 
+            preload  : 'auto', 
+            volume   : 0.67, 
+            mutex    : true
+        },
+
+        Mouse : {
+            enable  : true,
+            options : {
+                size  : 6,
+                sizeF : 24
+            }
+        },
+
+        LazyLoad : {
+            default : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/image/website/lazyload.svg'
+        },
+  
+        Style : {
+            aplayer          : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/APlayer.css',
+            archive          : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/archive.css',
+            donate           : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/donate.css',
+            fancybox         : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/jquery.fancybox.css',
+            footer           : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/footer.css',
+            iconfont         : 'https://at.alicdn.com/t/font_1546312_l3yohatebw.css',
+            index            : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/index.css',
+            menuBubble       : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/menu-bubble.css',
+            page             : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/page.css',
+            post             : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/post.css',
+            search           : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/search.css',
+            tocbot           : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/tocbot.css',
+            normal           : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/normal.css',
+            night            : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/night.css',
+            clipboard        : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/css/clipboard.css'
+        },
+
+        Script: {
+            aplayer          : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/APlayer.min.js',
+            config           : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/require.config.js',
+            index            : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/index.js',
+            instantSearch    : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/instantsearch.min.js',
+            jQuery           : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/jquery-3.4.1.min.js',
+            loading          : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/loading.js',
+            meting           : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/Meting.min.js',
+            iscroll          : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/iscroll.js',
+            require          : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/require.min.js'
+        },
+
+        Font: {
+            LongCang   : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/LongCang.css',
+            Monda      : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/Monda.css',
+            NotoSansSC : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/NotoSansSC.css',
+            Playball   : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/Playball.css',
+            PTMono     : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/PTMono.css',
+            RobotoSlab : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/RobotoSlab.css',
+            Rosario    : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/Rosario.css',
+            UbuntuMono : 'https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/font/UbuntuMono.css'
+        },
+
+        Suffix : {
+            about : '简单地活着, 肆意又精彩.'
+        },
+            
+        Theme : {
+            url  : 'https://github.com/first19326/Hexo-LiveForCode',
+            name : 'Hexo - Live For Code'
+        }  
+    };
+</script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/gh/first19326/cdn@master/static/js/index.js"></script>
+</body>
+</html>
